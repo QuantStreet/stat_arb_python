@@ -1,7 +1,11 @@
 # -*- coding: utf-8 -*-
 """
+
 @author: DF
 
+"""
+
+"""
 The purpose of the script is to showcase ability (it is not an alpha project):
     
 Cleans the data
@@ -12,7 +16,7 @@ Loops over pre determined rebalance points and conditions to create a
 realistic backtest
 
 Although it is not an alpha project, designing and testing alpha in this 
-script is very straightforward
+script is very straightforward. It is also adaptable to be functions or classes
 
 The motivation behind this is that managing a portfolio can be quite different
 than doing alpha research and this script is designed to account for the 
@@ -23,29 +27,54 @@ with my paid career history
 
 Data Source: Quandl/Sharadar
 
-As of 10/25/21 there are a few things that are still pending to be corrected.
-The ETA is few more days
+
+Occasionally there is a SettingWithCopyWarning from eval(), but it's not valid
+
+This script is 3 different pieces put together in one script for presentation 
+purposes
+
+Ignore the time portion of datetime64, I'm still considering whether it can 
+be useful for anything
 """
+
+
+
+import os
+import sys as sys
+import warnings as warnings
+
 import numpy as np
 import pandas as pd
-import os
 
+import matplotlib as matplotlib
 import matplotlib.pyplot as plt
-
 import cvxopt as cvxopt
 
 from datetime import timedelta
-
+import sklearn as sk
 import sklearn.preprocessing as pre
+from functools import reduce
+import yfinance as yf
 
 %matplotlib qt5
-'''
-Place holder for package version check
-'''
 
-# os.chdir('C:/Users/DF/Drive/Career/Projects/US_StatArb/')
-dataWD = 'C:/Users/Slava/Documents/Danny/Data Storage/'
-# dataWD = 'C:/Users/DF/Documents/Data Storage/'
+
+
+# module control:
+if sys.version_info[:2] != (3, 8): warnings.warn('Built using Python 3.8')
+
+modules_dict = {'np':'1.19.2', 'pd':'1.3.2', 'matplotlib':'3.4.3', 
+                 'cvxopt':'1.2.0', 'sk':'0.24.2', 'yf':'0.1.63'}
+for pack, vrs in modules_dict.items(): 
+   if(eval(pack + '.__version__') != vrs):
+       warnings.warn('Built using ' + pack + ' ' + vrs)
+       
+del matplotlib
+del sk
+
+# set up data directory containing Sharadar files
+
+dataWD = 'data path...'
 
 SEP = pd.read_csv(dataWD + 'SHARADAR_SEP.csv')
 SEP['date']=pd.to_datetime(SEP['date'])
@@ -70,29 +99,26 @@ SEP = SEP.query("ticker not in @rem_low_price")
 SF1 = pd.read_csv(dataWD + 'SHARADAR_SF1.csv')
 SF1['datekey']=pd.to_datetime(SF1['datekey'])
 SF1 = SF1.loc[SF1.datekey <= SEP.datadate.max()]
-# Throwing dtypes warning
+
 tickers = pd.read_csv(dataWD + 'SHARADAR_TICKERS.csv', low_memory = False)
+tickers.replace('None', np.nan, inplace = True)
 tickers.set_index('ticker', inplace = True)
 
-myTic = SEP['ticker'].unique()
+my_tic = SEP['ticker'].unique()
 
 assert not np.any(SEP.ticker.isna().values)
 
-# myDay = np.sort(SEP.datadate.unique())
+pd_day_all = np.union1d(SEP.datadate.unique(), SF1.datekey.unique())
 
-# pdDay = pd.DataFrame(myDay).rename(columns={0:'datadate'}).set_index(myDay)
+pd_day_all = pd.DataFrame(pd_day_all); my_tic=pd.DataFrame(my_tic)
 
-pdDay_all = np.union1d(SEP.datadate.unique(), SF1.datekey.unique())
+pd_day_all.rename(columns = {0:'datadate'}, copy = 0, inplace = 1)
+my_tic.rename(columns = {0:'ticker'}, copy = 0, inplace = 1)
 
-pdDay_all = pd.DataFrame(pdDay_all); myTic=pd.DataFrame(myTic)
+pd_day_all['key']=1; my_tic['key']=1
 
-pdDay_all.rename(columns = {0:'datadate'}, copy = 0, inplace = 1)
-myTic.rename(columns = {0:'ticker'}, copy = 0, inplace = 1)
-
-pdDay_all['key']=1; myTic['key']=1
-
-day_ticker_all = pdDay_all.merge(
-    myTic, 
+day_ticker_all = pd_day_all.merge(
+    my_tic, 
     how = 'outer', 
     on = 'key', 
     copy=False)
@@ -132,34 +158,55 @@ SEP['ret'] = (
     .apply(lambda x: (x.close + x.dividends) / x.close.shift() - 1)
     )
 
-# Work in progres ------
-# Fill in missing industry and sector classifications
-tickers.query('industry == "None"')
-tickers['sic_rank'] = tickers.query('siccode == siccode').siccode.rank(method = 'first')
-tickers.query('sic_rank == sic_rank').groupby('siccode').apply(lambda x: pd.DataFrame([{'sic_rank':x.sic_rank[0], 'sector':x.sector[0], 'industry':x.industry[0]}])).droplevel(level = 1)
-#  --------
-
+tickers.loc[:, ['sector', 'industry']] = (
+    tickers
+    .query('siccode == siccode and table == "SEP"')
+    .groupby(
+        tickers
+        .query('siccode == siccode and table == "SEP"')
+        .siccode
+        .astype('str')
+        .str[:3])
+    [['sector', 'industry']]
+    .apply(lambda x: x.fillna(method = 'ffill').fillna(method = 'bfill'))
+    )
 
 merge_tickers = tickers.query('table == "SEP"')[
         ['exchange', 'sector', 'category', 
          'famaindustry', 'siccode', 'industry', 'name']
     ]
 
-merge_tickers.query('industry == "None"')
+merge_tickers_drop = merge_tickers.query(
+    'industry == "" \
+    or sector != sector \
+    and siccode == siccode \
+    and category == "Domestic" \
+    and siccode != 9995')
+        
+# Drop missing labels, assume that they are small names that would have
+# gotten filtered out in either case
+if merge_tickers_drop.shape[0] < 100:
+    merge_tickers = merge_tickers.query(
+        'ticker not in @merge_tickers_drop.index')
+else: raise ValueError('There are too many empty classifications!')
 
-
-if not merge_tickers.query('industry == "" or industry != industry').empty:
-    raise ValueError(
-            'There are empty industry classifications, need to fill them in!')
-    
 SEP = SEP.merge(
     merge_tickers, 
     left_on = 'ticker', 
     right_index = True, 
-    how = 'left', 
+    how = 'inner', 
     copy = False)
 
 SEP = SEP.query("category == 'Domestic'")
+
+assert(all((
+    SEP
+    .loc[SEP.datadate.isin(SEP.datadate.unique()[::120])]
+    .groupby('datadate')
+    .ticker
+    .nunique()
+    ) > 3E3)
+    )
 
 SEP = SEP.merge(
     (SF1
@@ -183,14 +230,12 @@ SEP['shareswa'] = (
     SEP
     .groupby('ticker')
     .shareswa
-    .fillna(method = 'ffill', limit = 150)
-    )
-
-SEP['shareswa'] = (
-    SEP
-    .groupby('ticker')
-    .shareswa
-    .fillna(method = 'bfill', limit = 150)
+    .apply(
+        lambda x: 
+            (x
+            .fillna(method = 'ffill', limit = 150)
+            .fillna(method = 'bfill', limit = 50))
+            )
     )
 
 SEP['mktCap'] = SEP['close'] * SEP['shareswa']
@@ -222,14 +267,12 @@ SEP['days_to_DL'] = (
 # Getting book value (SHE), not FF method====
 SEP = SEP.merge(
         (SF1
-         .query('dimension == "ARQ"')[
-             ['ticker', 'datekey', 'equityusd']]
-         .rename(columns = {'datekey':'datadate'})), 
+         .query('dimension == "ARQ"')
+         [['ticker', 'datekey', 'equityusd']]
+         .rename(columns = {'datekey':'datadate', 'equityusd':'SHE'})), 
         on = ['ticker', 'datadate'], 
         how = 'left', 
         copy = False)
-
-SEP.rename(columns = {'equityusd':'SHE'}, inplace = True)
 
 SEP['SHE'] = SEP.groupby('ticker').SHE.fillna(method = 'ffill', limit = 150)
 
@@ -247,7 +290,6 @@ SF1_top.sort_values(by='datadate', inplace = True)
 
 SF1_top = SF1_top.groupby(['ticker', 'calendardate']).nth(0).reset_index()
 
-
 # Fill in missing obs
 # Order by calendardate and use datekey as effective date
 SF1_dates_full = (
@@ -263,7 +305,7 @@ SF1_dates_full = (
         copy=False)
     )
 
-# .map example
+# .map example, to remind what object is using for mapping
 # (SF1_top
 #  .ticker
 #  .map(SF1_top[SF1_top.dimension.notnull()]
@@ -340,7 +382,6 @@ SF1_top['eff_date'] = pd.to_datetime(SF1_top.eff_date, format='%Y%m%d')
 
 SF1_top['reportperiod'] = pd.to_datetime(SF1_top.reportperiod)
 
-
 SF1_top['eff_delta'] = SF1_top.eval('(eff_date-reportperiod).dt.days')
 
 SF1_top = SF1_top.query('eff_delta < 90')
@@ -370,7 +411,7 @@ SEP['vold15D'] = (
     .ret
     )
 
-SEP['dollar_vlm'] = SEP.eval('close * volume')
+SEP['dollar_vlm'] = SEP.eval('close * volume').replace(0, np.nan)
 
 # NB: not all filters are here due to single factor alpha example
 core_vars = {'volume':'volume', 
@@ -400,7 +441,7 @@ df_ret = coreSEP['ret']
 price_Cutoff = 6        # min price
 smallCap = 250E06   # min market cap
 mng_port_size = 1E09
-grandUniv = (df_ret * np.nan)
+grand_univ = (df_ret * np.nan)
 prev_tickers=pd.Series([], dtype = str)
 
 SEP['Year'] = SEP.datadate.dt.year
@@ -416,7 +457,7 @@ firstOfMonth = (
 
 starting_date=pd.to_datetime('2009-05-01')
 
-totMkt = (
+tot_mkt = (
     SEP
     .loc[SEP.datadate.isin(firstOfMonth.values)]
     .groupby('datadate')
@@ -424,20 +465,20 @@ totMkt = (
     .sum()
     )
 
-totMkt = totMkt.loc[totMkt.index >= starting_date]
-totMkt = totMkt/totMkt[0]
-totMkt = totMkt.rename('mktAdj')
+tot_mkt = tot_mkt.loc[tot_mkt.index >= starting_date]
+tot_mkt = tot_mkt/tot_mkt[0]
+tot_mkt = tot_mkt.rename('mkt_adj')
 
-for univ_date in firstOfMonth.loc[lambda x: x >= starting_date].values:
+for UNIV_DATE in firstOfMonth.loc[lambda x: x >= starting_date].values:
     
-    univ_date_30, univ_date_100, univ_date_21 = (
-        univ_date 
+    UNIV_DATE_30, UNIV_DATE_100, UNIV_DATE_21 = (
+        UNIV_DATE 
         - np.array([30, 100, 21], dtype='timedelta64[D]')
         )
     
-    univ_date_1 = (
+    UNIV_DATE_1 = (
         SEP
-        .query('datadate<@univ_date & close==close')
+        .query('datadate<@UNIV_DATE & close==close')
         .datadate
         .max()
         )
@@ -447,52 +488,52 @@ for univ_date in firstOfMonth.loc[lambda x: x >= starting_date].values:
         # equities
         'price':
         (coreSEP['price']
-         .loc[univ_date_30:univ_date_1,:]
+         .loc[UNIV_DATE_30:UNIV_DATE_1,:]
          .mean(axis = 0, skipna = True) > price_Cutoff
          ), 
         
         'mkt_cap':
         (coreSEP['mkt_cap']
-         .loc[univ_date_30:univ_date_1,:]
+         .loc[UNIV_DATE_30:UNIV_DATE_1,:]
          .mean(axis = 0, skipna = True) > smallCap
          ),
         
         'not_delisted':
-        coreSEP['DL_flag'].loc[univ_date_1,:] >= 25, 
+        coreSEP['DL_flag'].loc[UNIV_DATE_1,:] >= 25, 
         
         'ebitda':
         (coreSEP['ebitda']
-         .loc[univ_date_30:univ_date_1,:]
+         .loc[UNIV_DATE_30:UNIV_DATE_1,:]
          .apply(lambda x: any(x == x))
          ),
         # TODO: mtb needs to be revisted...
         
         'mtb':
         (coreSEP['mtb']
-         .loc[univ_date_30:univ_date_1,:]
+         .loc[UNIV_DATE_30:UNIV_DATE_1,:]
          .apply(
              lambda x: all((x.dropna() > -100) & (x.dropna() < 100)), axis = 0)
          ), 
         # Removes tickers that have very little price movement
         'vold':
-        coreSEP['vold'].loc[univ_date_1,:] > .0065, 
+        coreSEP['vold'].loc[UNIV_DATE_1,:] > .0065, 
         
         'NoSP500':
         (coreSEP['mkt_cap']
-         .loc[univ_date_30:univ_date_1,:]
+         .loc[UNIV_DATE_30:UNIV_DATE_1,:]
          .mean(axis = 0, skipna = True).rank(ascending = False) > 300
          ),
         # Sufficient observations
         'price_obs':
         (coreSEP['price']
-         .loc[univ_date_100:univ_date_1,:]
+         .loc[UNIV_DATE_100:UNIV_DATE_1,:]
          .apply(lambda x: x.count() >= x.shape[0] * .9)
          ),
         
         'volume_obs':
-        (coreSEP['dollar_vlm']
-         .loc[univ_date_21:univ_date_1,:]
-         .apply(lambda x: x.count() >= x.shape[0] * .9)
+        ((coreSEP['dollar_vlm']
+         .loc[UNIV_DATE_21:UNIV_DATE_1,:] > 0)
+         .apply(lambda x: x.sum() >= x.shape[0] * .9)
          )
     })
   
@@ -504,23 +545,23 @@ for univ_date in firstOfMonth.loc[lambda x: x >= starting_date].values:
   
     # Replicate the index in full in 10 days max, assume that other equities  
     # are earning a non-captureable small size premium
-    capFilter = (
+    cap_filter = (
         coreSEP['mkt_cap']
-        .loc[univ_date_30:univ_date_1,cur_ticker]
+        .loc[UNIV_DATE_30:UNIV_DATE_1,cur_ticker]
         .mean(axis = 0, skipna = True)
         .rename('mktCap')
         )
-    vlmFilter = (
+    vlm_filter = (
         coreSEP['dollar_vlm']
-        .loc[univ_date_30:univ_date_1,cur_ticker]
+        .loc[UNIV_DATE_30:UNIV_DATE_1,cur_ticker]
         .mean(axis = 0, skipna = True)
         .rename('dVlm')
         )
     
     # Average Dollar Volume
     adv = pd.merge(
-        capFilter, 
-        vlmFilter, 
+        cap_filter, 
+        vlm_filter, 
         how='inner', 
         left_index=True, 
         right_index=True, 
@@ -528,11 +569,11 @@ for univ_date in firstOfMonth.loc[lambda x: x >= starting_date].values:
     
     adv['w'] = adv.eval('mktCap / mktCap.sum()')
     
-    mktAdj = totMkt[univ_date]
+    MKT_ADJ = tot_mkt[UNIV_DATE]
     
     #Assumer there is at least 30% more volume in dark pools
     adv['daysToFill'] = adv.eval(
-        '@mng_port_size * @mktAdj * w /(dVlm * .01 * 1.3)')
+        '@mng_port_size * @MKT_ADJ * w /(dVlm * .01 * 1.3)')
     
     adv['prev'] = adv.index.isin(prev_tickers)
     
@@ -546,37 +587,38 @@ for univ_date in firstOfMonth.loc[lambda x: x >= starting_date].values:
     
     # Get the correct slice of dates and account for the end date of the 
     #   very last date in the backtest
-    if univ_date != firstOfMonth.values[-1]:
-        end_date = (
+    if UNIV_DATE != firstOfMonth.values[-1]:
+        END_DATE = (
             firstOfMonth
-            .iloc[np.flatnonzero(firstOfMonth.values == univ_date) + 1]
+            .iloc[np.flatnonzero(firstOfMonth.values == UNIV_DATE) + 1]
             .values[0] 
             - np.timedelta64(1, 'D')
             )
     else: 
-        end_date  = univ_date + np.timedelta64(30, 'D')
+        END_DATE  = UNIV_DATE + np.timedelta64(30, 'D')
 
-    grandUniv.loc[univ_date:end_date, vs] = True
+    grand_univ.loc[UNIV_DATE:END_DATE] *= np.nan
+    grand_univ.loc[UNIV_DATE:END_DATE, vs] = True
     
-    print(str(univ_date)[:10] + 
+    print(str(UNIV_DATE)[:10] + 
           ' ' + 
           str(filter_df.all(axis = 'columns').sum()) + 
           ' \\' + str(vs.shape[0]) + 
           ' Tickers')
      
 
-melt_grandUniv = grandUniv.stack()
+melt_grand_univ = grand_univ.stack()
 
-melt_grandUniv = melt_grandUniv.to_frame().rename(columns = {0:'Active'})
+melt_grand_univ = melt_grand_univ.to_frame().rename(columns = {0:'is_active'})
 
 SEP = SEP.merge(
-    melt_grandUniv, 
+    melt_grand_univ, 
     how = 'left', 
     left_on = ['datadate', 'ticker'], 
     right_index = True, 
     copy = False)
 # Days to DL < 10 is harder to enforce in practive but necessary
-SEP.loc[SEP.days_to_DL < 10, 'Active'] = False
+SEP.loc[SEP.days_to_DL < 10, 'is_active'] = False
 
 SEP['ebitda_12_mkt'] = SEP.eval('ebitda_12 / shift_mktCap')
 
@@ -584,7 +626,7 @@ scaler = pre.RobustScaler()
 
 SEP['ebitda_12_mkt_u'] = (
     SEP
-    .query('Active == True')
+    .query('is_active == True')
     .groupby(['datadate', 'sector'])
     .ebitda_12_mkt
     .transform(
@@ -614,22 +656,21 @@ ax2.set_xlim(rebal_dates[0], rebal_dates[-1])
 
 CUM_RET = 1
 
-# second test
-eBook.loc[cdate, 'A'] = -500E3
-eBook.loc[cdate, 'AAPL'] = 500E3
-
-lam = 14500
+LAM = 14500
 
 adj_ct = pd.Series([], dtype = 'float64')
 
-sector_lim=6E06
+SECTOR_LIM=6E06
    
-port_tgt = 500E06
-turnover_tgt = port_tgt / 10
+PORT_TGT = 500E06
+TURNOVER_TGT = PORT_TGT / 10
 
-wTurnover = 0
+w_TURNOVER = 0
 
-adv_all = coreSEP['dollar_vlm'].rolling(21, closed='right').mean().shift()
+adv_all = (coreSEP['dollar_vlm']
+           .rolling(21, closed='right', min_periods = 3)
+           .mean()
+           .shift())
 # Remove the last volume in each name to avoid look ahead bias
 stack_adv = adv_all.stack().reset_index().rename(columns = {0:'dVLM'})
 
@@ -651,21 +692,32 @@ while cdate <= rebal_dates[-1]:
     # NB: see optimization notes and explanation off github 
     # Need to make sure constraints dont contain contradictory values
     # get full book in 10 days ---> 500/10 = 50 million
+    adj_ct = adj_ct.iloc[0:0]
+    
     date_1 = cdate - np.timedelta64(1, 'D')
     date_180 = cdate - np.timedelta64(180, 'D')
     
     index_tickers = (
         SEP
-        .query('Active == 1 & datadate == @cdate')
+        .query('is_active==1 & datadate==@cdate & volume!=0')
         .ticker
         .sort_values()
         .values)
     
     book_names = eBook.loc[cdate].loc[lambda x: (x!=0) & (x==x)].index.values
     
+    suspended_tickers = (
+        SEP
+        .query('datadate==@cdate & volume==0 & ticker in @book_names')
+        .ticker
+        )
+    
+    book_names = book_names[~np.isin(book_names, suspended_tickers)]
+    
     active_tickers = np.union1d(index_tickers, book_names)
      
     add_tickers = active_tickers[~np.isin(active_tickers, index_tickers)]
+    # add_tickers = add_tickers[0:0]
     
     # Notice that SEP is sorted by ticker first
     # sector dummy df
@@ -673,7 +725,28 @@ while cdate <= rebal_dates[-1]:
     
     w = eBook.loc[cdate, active_tickers].rename('wght')
     
-    assert ~w.isnull().any()   
+    assert ~w.isnull().any()
+    
+    a = (
+        SEP
+        .query("datadate == @cdate & ticker in @active_tickers")
+        .loc[:, ['ticker', 'ebitda_12_mkt_u']]
+        .set_index('ticker')
+        .rename(columns = {'ebitda_12_mkt_u':'alpha'})
+        .fillna(0)
+        )
+    
+    no_data_adds = active_tickers[~np.isin(active_tickers, a.index)]
+    # add tickers that don't have data and are liquidated
+    a = (a
+         .append(pd.DataFrame(
+             data = {'alpha' : np.repeat(0, no_data_adds.size)}, 
+             index = no_data_adds))
+         .sort_index()
+         )
+    
+    assert(sBook.loc[cdate, no_data_adds].abs().sum() < 300E3)
+    assert(no_data_adds.size <= 10)
     
     df_limits = pd.merge(
         w, 
@@ -696,7 +769,7 @@ while cdate <= rebal_dates[-1]:
     df_limits['adv13'] = df_limits.adv * .013 # for easy ref
     
     df_limits['pos_limit'] = np.minimum(
-        df_limits.eval("10 * adv * .013"), .025 * port_tgt)
+        df_limits.eval("10 * adv * .013"), .025 * PORT_TGT)
     
     # double the limit when the name is scheduled for delisting
     df_limits.loc[df_limits.days_to_DL <= 10, 'adv13'] *= 2
@@ -704,23 +777,20 @@ while cdate <= rebal_dates[-1]:
     df_limits.loc[no_data_adds, 'adv13'] = df_limits.wght.abs() * 1.1
     
     df_limits['liq'] = (
-    (df_limits
-    .loc[add_tickers]
-    [['wght', 'adv13']]
-    .abs()
-    .min(axis = 1)) 
-    * -np.sign(df_limits.wght)
-    )
-    
-    # minimum set of wSol
-    wSol = w * 0
-    wSol[add_tickers] = df_limits.liq.dropna()
+        (df_limits
+        .loc[add_tickers]
+        [['wght', 'adv13']]
+        .abs()
+        .min(axis = 1)) 
+        * -np.sign(df_limits.wght)
+        )
     
     full_optim = (
         (cdate in rebal_dates) or 
-        (eBook.loc[cdate].abs().sum() < (port_tgt * .9)) or 
-        wSol.abs().sum() > (port_tgt * .1) or 
-        np.max((sec_dum.T.dot(w).abs().values)) > (sector_lim * 1.2)
+        (np.abs(PORT_TGT - eBook.loc[cdate].abs().sum()) > (PORT_TGT * .1)) #or 
+        # Higher turnover condition
+        # wSol.abs().sum() > (PORT_TGT * .1) or 
+        # np.max((sec_dum.T.dot(w).abs().values)) > (SECTOR_LIM * 1.2)
         )
             
     if full_optim:
@@ -732,6 +802,12 @@ while cdate <= rebal_dates[-1]:
         
         df_limits['buy_limit'] = np.maximum(df_limits.semi_buy_limit, 0)
         df_limits['sell_limit'] = np.minimum(df_limits.semi_sell_limit, 0)
+        
+        df_limits.loc[df_limits.buy_limit == 0, 'buy_limit'] = df_limits.adv13
+        df_limits.loc[df_limits.sell_limit == 0, 'sell_limit']=-df_limits.adv13
+        
+        df_limits.loc[add_tickers, 'buy_limit'] = df_limits.liq.abs()*1.1
+        df_limits.loc[add_tickers, 'sell_limit'] = -df_limits.liq.abs()*1.1
         
         df_limits['buy_min'] = (
             df_limits
@@ -748,63 +824,54 @@ while cdate <= rebal_dates[-1]:
             .max(axis = 1)
             )
         
-        # df_limits['liq'] = (
-        #     (df_limits
-        #     .loc[add_tickers]
-        #     [['wght', 'adv13']]
-        #     .abs()
-        #     .min(axis = 1)) 
-        #     * -np.sign(df_limits.wght)
-        #     )
-        
         # To avoid rounding errors in optimization
         df_limits.loc[add_tickers, ['buy_limit', 'sell_limit']] *= 1.1
-        
-        # df_limits['buy_min'] *= .98
-        # df_limits['sell_min'] *= .98
-        
-        df_limits['sector'] = tickers.query('table == "SEP"').sector
         
         liq_matrix = np.zeros((add_tickers.size, w.size))
         # Accepting tips on how to replace the for loop with something prettier
         for i in np.arange(add_tickers.size):
             liq_matrix[i, np.where(w.index.values == add_tickers[i])] = 1
         
+    df_limits['sector'] = tickers.query('table == "SEP"').sector
     
-        
+    df_limits['sector_lim_w'] = (
+        df_limits
+        .sector
+        .map(
+            np.minimum(
+                1, 
+                (SECTOR_LIM * 1.2) 
+                / (df_limits
+                   .query('ticker not in @add_tickers')
+                   .groupby('sector')
+                   .wght.sum().abs()
+                   )
+                )
+            )
+        )
+    
+    df_limits['liq_sector_w'] = (
+        df_limits
+        .query('sector_lim_w != 1')
+        .eval('-1 * wght * (1 - sector_lim_w)')
+        )
+    
+    # minimum set of wSol, added trimming excess sector positions
+    wSol = df_limits.liq.fillna(df_limits.liq_sector_w).fillna(0)
+    
     diag_mat = np.eye(len(active_tickers))
     
     cov_mat = df_ret.loc[date_180:date_1, active_tickers].cov()
     # shrink a little bit to promote invertibility, new Covariance Matrix
     nCM = (.1 * np.diag(cov_mat).mean() * np.eye(len(active_tickers))) \
           + (.90 * cov_mat)
-              
-              
-    a = (
-        SEP
-        .query("datadate == @cdate & ticker in @active_tickers")
-        .loc[:, ['ticker', 'ebitda_12_mkt_u']]
-        .set_index('ticker')
-        .rename(columns = {'ebitda_12_mkt_u':'alpha'})
-        .fillna(0)
-        )
-    # add tickers that don't have data and are liquidated
-    a = (a
-         .append(pd.DataFrame(
-             data = {'alpha' : np.repeat(0, no_data_adds.size)}, 
-             index = no_data_adds))
-         .sort_index()
-         )
     
-    assert(sBook.loc[cdate, no_data_adds].abs().sum() < 300E3)
-    assert(no_data_adds.size <= 10)
+    mu=.015/2/2
     
-    mu=.015*4
-    
-    if wSol.abs().sum() > (port_tgt * .1): 
+    if wSol.abs().sum() > (PORT_TGT * .1): 
         print('~~~~~~ OUT OF UNIVERSE NAMES ARE MATERIAL ~~~~~~~')
         
-    while ((np.abs(wTurnover - turnover_tgt) > (.1 * turnover_tgt)) or 
+    while ((np.abs(w_TURNOVER - TURNOVER_TGT) > (.1 * TURNOVER_TGT)) or 
           adj_ct.size == 0):
         if not full_optim: break
         # Lost a little efficiency/ PEP8 for much better readability
@@ -816,8 +883,8 @@ while cdate <= rebal_dates[-1]:
             np.hstack((np.vstack((nCM, nCM)), 
                        np.vstack((nCM, nCM)))))
         
-        q = np.hstack((2 * mu * nCM.dot(w) - a.alpha + lam * tau, 
-                       2 * mu * nCM.dot(w) - a.alpha - lam * tau))
+        q = np.hstack((2 * mu * nCM.dot(w) - a.alpha + LAM * tau, 
+                       2 * mu * nCM.dot(w) - a.alpha - LAM * tau))
         
         G = np.vstack(
             (
@@ -839,47 +906,51 @@ while cdate <= rebal_dates[-1]:
             df_limits['buy_limit'],
             -df_limits['sell_limit'], 
             # Sector neutrality limits
-            sector_lim * np.ones(sec_dum.shape[1]) - sec_dum.T.dot(w).values, 
-            sector_lim * np.ones(sec_dum.shape[1]) + sec_dum.T.dot(w).values, 
+            SECTOR_LIM * np.ones(sec_dum.shape[1]) - sec_dum.T.dot(w).values, 
+            SECTOR_LIM * np.ones(sec_dum.shape[1]) + sec_dum.T.dot(w).values, 
             ))
         
         A = np.vstack(
             (np.ones([1, len(active_tickers)*2]), 
-             np.hstack((liq_matrix, liq_matrix)))
+             # np.hstack((liq_matrix, liq_matrix))
+             np.hstack((1 * liq_matrix, 0 * liq_matrix)),
+             np.hstack((0 * liq_matrix, 1 * liq_matrix)))
             )
-            
-        # NB: strict LS requires more computations
+        
         b = np.concatenate(
                 (0 - w.sum(), # Enforce strict long - short portfolio
-                 df_limits.liq.dropna().values), 
+                 np.maximum(df_limits.liq.dropna().values, 0),
+                 np.minimum(df_limits.liq.dropna().values, 0)),
                 axis = None)
         
+        H_SCALER = np.round(pd.Series(h).mean() / 500, -2)
         # # debug all inputs
         # for i in ['P', 'q', 'G', 'h', 'A', 'b']:
         #     print(pd.DataFrame(globals()[i]).isnull().sum().sum(), '\n')
         
         P_ = cvxopt.matrix(P, tc='d')
         q_ = cvxopt.matrix(q, tc='d')
-        G_ = cvxopt.matrix(G, tc='d')
-        h_ = cvxopt.matrix(h, tc='d')
+        G_ = cvxopt.matrix(G / H_SCALER, tc='d')
+        h_ = cvxopt.matrix(h / H_SCALER, tc='d')
         A_ = cvxopt.matrix(A, tc='d')
         b_ = cvxopt.matrix(b, tc='d')
         
-        sol = cvxopt.solvers.qp(P_,q_,G_,h_,A_,b_, maxiters = 20)
+        sol = cvxopt.solvers.qp(P_,q_,G_,h_,A_,b_, maxiters = 30)
         
-        assert np.abs(sol['gap']) < 3E4
+        assert sol['status'] == 'optimal'
+        # assert np.abs(sol['gap']) < 3E4
     
         wSol = np.array(sol['x']).reshape((2, -1)).T.sum(axis = 1).round(2)
         
-        wTurnover = np.abs(wSol).sum().round(2)
+        w_TURNOVER = np.abs(wSol).sum().round(2)
         
-        adj_ct = adj_ct.append(pd.Series({wTurnover:lam})).rename('lam0')
+        adj_ct = adj_ct.append(pd.Series({w_TURNOVER:LAM})).rename('lam0')
         
         print(
-            'tried lam = ', lam, 
-            '...Turnover: ', np.round(wTurnover/1E6, 1),'\n')
+            'tried LAM = ', LAM, 
+            '...Turnover: ', np.round(w_TURNOVER/1E6, 1),'\bE6 \n')
         
-        if (np.abs(wTurnover - turnover_tgt) > (.1 * turnover_tgt)):
+        if (np.abs(w_TURNOVER - TURNOVER_TGT) > (.1 * TURNOVER_TGT)):
             
             if adj_ct.size > 5: 
                 raise ValueError(
@@ -887,25 +958,25 @@ while cdate <= rebal_dates[-1]:
 
             # Use linear interpolation! No need for second order expansion
             if adj_ct.size == 1:
-                lam *= wTurnover / turnover_tgt 
+                LAM *= w_TURNOVER / TURNOVER_TGT 
             else: 
-                lam = (
+                LAM = (
                     adj_ct.iloc[-1] 
                     + (
                         (adj_ct.iloc[-1] - adj_ct.iloc[-2]) 
                         / (adj_ct.index[-1] - adj_ct.index[-2])
                         ) 
-                    * (turnover_tgt - adj_ct.index[-1])
+                    * (TURNOVER_TGT - adj_ct.index[-1])
                     )
-            if lam<14500 and adj_ct.min()>14500: lam = 14500 
-            lam = np.round(lam)
+            if LAM<1 and adj_ct.min()>1: LAM = 1
+            LAM = np.round(LAM)
             
-            if lam < 0: raise ValueError('lambda is negative!')
+            if LAM < 0: raise ValueError('lambda is negative!')
             
         
     if wSol[wSol != 0].size > add_tickers.size:
-        print(f'lam is: {lam} || ',
-              f'wTurnover: {"{:0=.2f}".format(wTurnover/1E6)}E06 || ',
+        print(f'LAM is: {LAM} || ',
+              f'w_TURNOVER: {"{:0=.2f}".format(w_TURNOVER/1E6)}E06 || ',
               f'cdate: {str(cdate)[:10]} \n')
     
     # Rebalance happens at the end of the day
@@ -947,8 +1018,8 @@ while cdate <= rebal_dates[-1]:
         book_tgt = (
             .5 
             * (np.min(
-                (port_tgt - df_limits.query('liq != liq').wght.abs().sum(), 
-                turnover_tgt)) # easier way to rewrite the below?
+                (PORT_TGT - df_limits.query('liq != liq').wght.abs().sum(), 
+                TURNOVER_TGT)) # easier way to rewrite the below?
                + (w.abs().sum() 
                   - (df_limits
                      .query('liq == liq')
@@ -958,17 +1029,16 @@ while cdate <= rebal_dates[-1]:
                )
         )
         
-        # Work in progress
-        df_wSol['final_book2'] = (
+        df_wSol['final_book'] = (
             df_wSol
             .query("check_book != 0 & ticker not in @add_tickers")
             .groupby(np.sign(df_wSol.check_book), group_keys = False)
             # [['check_book', 'sector']]
-            .apply(lambda x: x.check_book * (book_tgt * x.sector_w / 2 / x.check_book.abs().sum()))
+            .apply(lambda x: x.check_book * (book_tgt / x.check_book.abs().sum()))
             .round(1)
             )
-        
- 
+        # debug leftover
+        # df_wSol[df_wSol.columns.difference(['sector'])].abs().sum()
         
         df_wSol.final_book.fillna(df_wSol.check_book, inplace = True)
         df_wSol['delta'] = df_wSol.eval("final_book - book")
@@ -977,9 +1047,9 @@ while cdate <= rebal_dates[-1]:
         
         dBook.loc[cdate] = df_wSol['delta']
     
-    iDate = np.argwhere(df_ret.index.values == cdate)[0] #integer date
+    idate = np.argwhere(df_ret.index.values == cdate)[0] #integer date
     
-    ndate=df_ret.index.values[iDate[0]+1]
+    ndate=df_ret.index.values[idate[0]+1]
     # The slice must contain all names due to errors if dates need to be rerun
     sBook.loc[ndate] = (eBook.loc[cdate] + dBook.loc[cdate]).fillna(0)
     
@@ -1008,16 +1078,207 @@ while cdate <= rebal_dates[-1]:
     
     # Real time plotting
     color = '#2CA453'
-    if eBook.loc[ndate].sum() < 0: color= '#F04730'
+    if next_ret < 0: color= '#F04730'
     
     ax.plot([cdate, ndate], [CUM_RET, CUM_RET * (1 + next_ret)], color = color)
     ax2.bar(ndate, sBook.loc[ndate].abs().sum(), color='lightblue')
     
     CUM_RET *= 1 + next_ret
     cdate = ndate
-    adj_ct = adj_ct.iloc[0:0]
-    
+    # for plot update
     plt.pause(0.05)
     
-# Plotting coming soon
 
+# https://towardsdatascience.com/
+# downloading-historical-stock-prices-in-python-93f85f059c1f1
+Symbols = ['SPY', 'IWM', 'AAPL']
+START_DATE = SEP.datadate.min()
+END_DATE = SEP.datadate.max()
+BM = pd.DataFrame()
+# iterate over each symbol
+for i in Symbols:  
+    # print the symbol which is being downloaded
+    print(str(Symbols.index(i)) + str(' : ') + i, sep=',', end=',', flush=True)  
+    try:
+        # download the stock price 
+        stock = []
+        stock = yf.download(i,start=START_DATE, end=END_DATE, progress=False)
+        # append the individual stock prices 
+        if len(stock) == 0:
+            None
+        else:
+            stock['Name']=i
+            BM = BM.append(stock,sort=False)
+    except Exception:
+        None    
+
+
+group_dates = pd.DataFrame({'datadate' : df_ret.index.values})
+
+group_dates['rebal_date'] = group_dates.query("datadate in @rebal_dates").datadate
+
+group_dates.rebal_date = group_dates.rebal_date.shift()
+
+group_dates.rebal_date = group_dates.query("rebal_date == rebal_date").datadate
+
+group_dates.rebal_date = group_dates.rebal_date.fillna(method = 'ffill')
+
+SEP['rebal_date'] = SEP.datadate.map(group_dates.set_index('datadate').squeeze())
+
+# Speeding up queries
+SEP['any_active'] = (
+    SEP
+    .ticker
+    .isin(SEP[['ticker', 'is_active']].query('is_active == True').ticker.unique())
+    )
+
+agg_ret = (
+    SEP
+    [['datadate', 'rebal_date', 'ticker', 'ret', 'any_active', 
+      'is_active', 'shift_mktCap', 'ebitda_12_mkt_u', 'sector']]
+    .query("rebal_date==rebal_date & any_active==True")
+    )
+
+agg_ret['rebal_active'] = (
+    agg_ret
+    .groupby(['rebal_date', 'ticker'])
+    .is_active
+    .fillna(method = 'ffill')
+    )
+
+agg_ret = agg_ret.query('rebal_active == rebal_active')
+
+agg_ret['alpha_quintile'] = (
+    agg_ret
+    .query("is_active==True & rebal_date==datadate")
+    .groupby(['datadate', 'sector'])
+    .ebitda_12_mkt_u
+    .transform(lambda x: pd.qcut(x, 5, labels = False))
+    )
+
+# This is beginning of the day rebal vs strat end of day
+agg_ret['BM_w'] = (
+    agg_ret
+    .query('is_active==True & rebal_date == datadate')
+    .groupby('rebal_date', group_keys = False)
+    .apply(lambda x: x.shift_mktCap / x.shift_mktCap.sum())
+    )
+
+agg_ret['quintile_w'] = (
+    agg_ret
+    .query('is_active==True & rebal_date == datadate')
+    .groupby(['rebal_date', 'alpha_quintile'], group_keys = False)
+    .apply(lambda x: x.shift_mktCap / x.shift_mktCap.sum())
+    )
+
+agg_ret[['BM_w', 'alpha_quintile', 'quintile_w']] = (
+    agg_ret
+    .groupby(['ticker', 'rebal_date'])
+    [['BM_w', 'alpha_quintile', 'quintile_w']]
+    .fillna(method = 'ffill')
+    )
+    
+piv_agg_ret = agg_ret.pivot(
+    index = ['datadate', 'ticker', 'BM_w', 'ret'], 
+    columns = ['alpha_quintile'], 
+    values = 'quintile_w')
+
+piv_agg_ret.drop(columns = np.nan, inplace = True)
+
+piv_agg_ret.rename(columns = lambda x: 'quintile_' + str(x)[0], inplace = True)
+
+piv_agg_ret.reset_index(['BM_w', 'ret'], inplace = True)
+
+# Long Short Plotting
+BM = BM.query("Name == 'IWM'")
+BM.rename(columns = {'Adj Close' : 'adj_close'}, inplace = True, copy = False)
+BM['BM_ret'] = BM.adj_close / BM.adj_close.shift() - 1
+
+backtest = reduce(
+    lambda left_df, right_df: 
+        pd.merge(left_df, right_df, how = 'left', on = 'datadate'), 
+    [eBook.sum(axis = 1).rename('end_book'), 
+     sBook.sum(axis = 1).rename('start_book'), 
+     sBook.abs().sum(axis = 1).rename('book_size'),
+     eBook.abs().sum(axis = 1).rename('abs_book_size'), 
+     # Long side only
+     np.maximum(0, eBook).sum(axis = 1).rename('end_book_long'), 
+     np.maximum(0, sBook).sum(axis = 1).rename('start_book_long'), 
+     np.maximum(0, sBook).abs().sum(axis = 1).rename('book_size_long')])
+    
+backtest = backtest.query('datadate >= @rebal_dates[0]')
+
+backtest['ret'] = backtest.eval("(end_book - start_book) / (.3 * book_size)")
+backtest['ret_long'] = backtest.eval(
+    "(end_book_long - start_book_long) / (book_size_long)")
+
+backtest = backtest.query("(book_size != 0) or (datadate < @rebal_dates[-1])")
+
+backtest.loc[rebal_dates[0]].fillna(0, inplace = True)
+
+LS_plot_data = (
+    backtest
+    .ret
+    .rename('LS_Backtest')
+    .to_frame()
+    .merge(
+        (piv_agg_ret
+         [['BM_w'] + ['quintile_' + str(x) for x in range(0,5)]]
+         .apply(lambda x: x * piv_agg_ret.ret)
+         .groupby('datadate')
+         .sum()
+         .eval('quintile_4 - quintile_0')
+         .rename('LS_Quintiles')),
+        how = 'left', 
+        left_index = True, 
+        right_index = True, 
+        copy = False)
+    )
+
+LS_plot_data.iloc[0] = LS_plot_data.iloc[0].fillna(0)
+
+# https://towardsdatascience.com/
+# basics-of-ohlc-charts-with-pythons-matplotlib-56d0e745a5be
+fig, (ax, ax2) = plt.subplots(
+    2, 
+    figsize=(12,8), 
+    gridspec_kw={'height_ratios': [4, 1]})
+
+ax.plot((1+ LS_plot_data).cumprod(), label = LS_plot_data.columns)
+ax2.bar(backtest.index, backtest.abs_book_size / 1E6, color='lightblue')
+ax2.plot(backtest.abs_book_size / 1E6, color='green')
+ax.legend()
+ax.margins(x = .02)
+ax2.margins(x = .02)
+ax.set_ylabel('Portfolio Growth')
+ax2.set_ylabel('Port Size\n(in $ millions)')# grid
+ax2.set_yticks(np.arange(0,7) * 100)
+ax.grid(color='black', linestyle='dashed', which='both', alpha=0.2)
+ax2.set_axisbelow(False)
+ax2.grid(color='black', linestyle='dashed', which='both', alpha=0.2)# remove spines
+ax.set_title('Long-Short Portfolios', color = 'darkgreen')
+ax2.set_xlabel('Date')
+
+# Benchmarks Comparison Plotting
+BM_plot_data =  reduce(
+    lambda left_df, right_df: 
+        pd.merge(
+            left_df, 
+            right_df, 
+            how = 'left', 
+            left_index = True, 
+            right_index = True), 
+    [backtest.ret_long.rename('Backtest_long_leg'),
+     piv_agg_ret.eval('BM_w*ret').groupby('datadate').sum().rename('Universe'),
+     BM.BM_ret.rename('IWM')])
+ 
+BM_plot_data.iloc[0] = 0
+
+((1 + BM_plot_data)
+.cumprod()
+.plot())
+
+plt.grid('on', ls = '--')
+plt.ylabel('Portfolio Value')
+plt.xlabel('Date')
+plt.title('Comparison to Long Benchmarks')
